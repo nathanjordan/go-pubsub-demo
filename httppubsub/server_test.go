@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -14,7 +15,7 @@ import (
 
 // TestServerSuccess tests normal operation of the server with publishes/subscriptions and unsubscriptions.
 func TestServerSuccess(t *testing.T) {
-	runServerTest(t, func(args serverTestArgs) {
+	runServerTest(t, func(args *serverTestArgs) {
 		msg := &Message{
 			Data: "Hello!",
 		}
@@ -46,11 +47,15 @@ func TestServerSuccess(t *testing.T) {
 		msg2, err = sub2.Wait()
 		require.NoError(t, err)
 		require.Equal(t, msg, msg2)
+		args.assertLogMessages(t,
+			"received new subscription",
+			"received publish from",
+		)
 	})
 }
 
 func TestProduceWrongMethod(t *testing.T) {
-	runServerTest(t, func(args serverTestArgs) {
+	runServerTest(t, func(args *serverTestArgs) {
 		broadcastURL := args.server.URL + "/broadcast"
 		resp, err := args.client.Get(broadcastURL)
 		require.NoError(t, err)
@@ -59,8 +64,21 @@ func TestProduceWrongMethod(t *testing.T) {
 	})
 }
 
+func TestProduceTooLargeRequest(t *testing.T) {
+	runServerTest(t, func(args *serverTestArgs) {
+		broadcastURL := args.server.URL + "/broadcast"
+		data := strings.Repeat("stringstring", 100000)
+		data = `{key:"` + data + `"}"`
+		resp, err := args.client.Post(broadcastURL, "application/json" /*contentType*/, bytes.NewBufferString(data))
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		require.Equal(t, http.StatusRequestEntityTooLarge, resp.StatusCode)
+	})
+}
+
 func TestProduceBadRequest(t *testing.T) {
-	runServerTest(t, func(args serverTestArgs) {
+	runServerTest(t, func(args *serverTestArgs) {
 		broadcastURL := args.server.URL + "/broadcast"
 		data := "<notJson}"
 		resp, err := args.client.Post(broadcastURL, "application/json" /*contentType*/, bytes.NewBufferString(data))
@@ -71,8 +89,12 @@ func TestProduceBadRequest(t *testing.T) {
 	})
 }
 
-func runServerTest(t *testing.T, testFn func(args serverTestArgs)) {
-	ps, err := NewServer()
+func runServerTest(t *testing.T, testFn func(args *serverTestArgs)) {
+	args := &serverTestArgs{}
+	logFn := func(format string, v ...interface{}) {
+		args.logs = append(args.logs, fmt.Sprintf(format, v...))
+	}
+	ps, err := NewServer(WithLogger(logFn), WithMaxRequestSize(10000))
 	require.NoError(t, err)
 
 	server := httptest.NewServer(ps)
@@ -81,17 +103,17 @@ func runServerTest(t *testing.T, testFn func(args serverTestArgs)) {
 
 	wsURL := fmt.Sprintf("ws://%s/subscribe", server.Listener.Addr())
 
-	testFn(serverTestArgs{
-		server: server,
-		client: client,
-		wsURL:  wsURL,
-	})
+	args.server = server
+	args.client = client
+	args.wsURL = wsURL
+	testFn(args)
 }
 
 type serverTestArgs struct {
 	server *httptest.Server
 	client *http.Client
 	wsURL  string
+	logs []string
 }
 
 func (args serverTestArgs) broadcast(t *testing.T, msg *Message) {
@@ -109,6 +131,27 @@ func (args serverTestArgs) newSubscriber(t *testing.T) *clientSubscriber {
 	require.NoError(t, err)
 
 	return newClientSubscriber(ws)
+}
+
+func (args serverTestArgs) assertLogMessages(t *testing.T, msgs ...string) {
+	t.Helper()
+
+	for _, msg := range msgs {
+		var found bool
+		for _, log := range args.logs {
+			// some logs are dynamic, say when logging a dynamic port. assert on a snippet.
+			if strings.Contains(log, msg) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("failed to find log %q", msg)
+		}
+		if t.Failed() {
+			t.Log(args.logs)
+		}
+	}
 }
 
 type clientSubscriber struct {

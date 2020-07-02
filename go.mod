@@ -8,5 +8,5 @@ require (
 	go.uber.org/goleak v1.0.0
 	golang.org/x/net v0.0.0-20200625001655-4c5254603344
 	golang.org/x/sync v0.0.0-20200625203802-6e8e738ad208
-	honnef.co/go/tools v0.0.1-2020.1.4 // indirect
+	golang.org/x/tools v0.0.0-20191130070609-6e064ea0cf2d // indirect
 )

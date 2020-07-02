@@ -17,3 +17,10 @@ func WithLogger(logger Logger) ServerOption {
 func nopLogger() Logger {
 	return func(_ string, _ ...interface{}) {}
 }
+
+// WithMaxRequestSize sets a limit on the max broadcast request size.
+func WithMaxRequestSize(sizeInBytes int64) ServerOption {
+	return func(s *Server) {
+		s.maxRequestSize = sizeInBytes
+	}
+}

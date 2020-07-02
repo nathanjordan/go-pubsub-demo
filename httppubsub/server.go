@@ -2,7 +2,7 @@ package httppubsub
 
 import (
 	"encoding/json"
-	"fmt"
+	"github.com/nathanjordan/go-pubsub-demo/internal/httpjson"
 	"io"
 	"io/ioutil"
 	"net/http"
@@ -12,11 +12,14 @@ import (
 	"golang.org/x/net/websocket"
 )
 
+const defaultMaxRequestSize = 1024 * 1024 // 1MB
+
 // Server is a broadcast-only pubsub server.
 type Server struct {
 	mux    *http.ServeMux
 	pubsub *pubsub.PubSub
 	log    Logger
+	maxRequestSize int64
 }
 
 // NewServer returns a new Server.
@@ -26,6 +29,10 @@ func NewServer(opts ...ServerOption) (*Server, error) {
 		mux:    mux,
 		pubsub: pubsub.NewPubSub(),
 		log:    nopLogger(),
+		maxRequestSize: defaultMaxRequestSize,
+	}
+	for _, opt := range opts {
+		opt(s)
 	}
 	mux.HandleFunc("/broadcast", s.broadcast)
 	wsServer := websocket.Server{
@@ -41,7 +48,7 @@ func (s *Server) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 }
 
 func (s *Server) subscribe(ws *websocket.Conn) {
-	s.log("received new subscription from %v", ws.RemoteAddr())
+	s.log("received new subscription")
 
 	subscriber := newSubscriber(ws)
 	subscriber.start()
@@ -56,24 +63,32 @@ func (s *Server) broadcast(rw http.ResponseWriter, req *http.Request) {
 	s.log("received publish from %s", req.RemoteAddr)
 
 	if req.Method != "POST" {
-		http.Error(rw, "use POST for publishing", http.StatusMethodNotAllowed)
+		httpjson.JSONError(rw, http.StatusMethodNotAllowed, "use POST for publishing")
 		return
 	}
-	body, err := ioutil.ReadAll(req.Body)
+
+	// protect DoS from oversized requests
+	r := &io.LimitedReader{
+		R: req.Body,
+		N: s.maxRequestSize+1, // read one more byte to be exact
+	}
+	body, err := ioutil.ReadAll(r)
 	if err != nil {
-		msg := fmt.Sprintf("failed to read response body: %v", err)
-		http.Error(rw, msg, http.StatusBadRequest)
+		httpjson.JSONError(rw, http.StatusBadRequest, "failed to read response body: %v", err)
 		return
 	}
+	if r.N == 0 {
+		httpjson.JSONError(rw, http.StatusRequestEntityTooLarge, "request was too large")
+		return
+	}
+
 	var msg Message
 	if err := json.Unmarshal(body, &msg); err != nil {
-		msg := fmt.Sprintf("failed to unmarshal message: %v", err)
-		http.Error(rw, msg, http.StatusBadRequest)
+		httpjson.JSONError(rw, http.StatusBadRequest, "failed to unmarshal message: %v", err)
 		return
 	}
 	if err := s.pubsub.Broadcast(pubsub.NewMessageString(msg.Data)); err != nil {
-		msg := fmt.Sprintf("failed to publish message: %v", err)
-		http.Error(rw, msg, http.StatusInternalServerError)
+		httpjson.JSONError(rw, http.StatusInternalServerError, "failed to publish message: %v", err)
 		return
 	}
 	rw.WriteHeader(http.StatusOK)
